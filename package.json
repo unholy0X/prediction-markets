@@ -1,0 +1,43 @@
+{
+  "name": "trading-prediction-platform",
+  "version": "1.0.0",
+  "description": "Trading prediction platform with React, Node.js, and Go microservices",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:backend": "node server.js",
+    "start:frontend": "npx http-server -p 3001 -c-1",
+    "start:go:engine": "cd go-services/order-matching-engine && go run main.go",
+    "start:go:market": "cd go-services/market-data-service && go run main.go",
+    "start:go:all": "concurrently \"npm run start:go:engine\" \"npm run start:go:market\"",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run start:go:all\"",
+    "dev:backend": "nodemon server.js",
+    "dev:frontend": "npx http-server -p 3001 -c-1 -o",
+    "build:go": "cd go-services/order-matching-engine && go build -o bin/engine && cd ../market-data-service && go build -o bin/market",
+    "install:all": "npm install && cd go-services/order-matching-engine && go mod download && cd ../market-data-service && go mod download",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.9.0",
+    "@grpc/proto-loader": "^0.7.10",
+    "@sendgrid/mail": "^8.1.6",
+    "axios": "^1.13.6",
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.9.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^9.3.1",
+    "mongoose-url-slugs": "^1.0.2",
+    "paytmchecksum": "^1.5.1",
+    "uuid": "^9.0.0",
+    "validator": "^13.15.26",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "http-server": "^14.1.1",
+    "nodemon": "^3.0.1"
+  }
+}
