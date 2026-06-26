@@ -40,3 +40,7 @@ yarn-error.log*
 
 # vercel
 .vercel
+
+# Go service binaries
+go-services/*/bin/
+go-services/prediction-service/prediction-service
