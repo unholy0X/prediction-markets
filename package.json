@@ -9,12 +9,15 @@
     "start:frontend": "npx http-server -p 3001 -c-1",
     "start:go:engine": "cd go-services/order-matching-engine && go run main.go",
     "start:go:market": "cd go-services/market-data-service && go run main.go",
-    "start:go:all": "concurrently \"npm run start:go:engine\" \"npm run start:go:market\"",
+    "start:go:prediction": "cd go-services/prediction-service && go run .",
+    "start:go:all": "concurrently \"npm run start:go:engine\" \"npm run start:go:market\" \"npm run start:go:prediction\"",
+    "db:up": "cd go-services/prediction-service && docker compose up -d",
+    "db:down": "cd go-services/prediction-service && docker compose down",
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run start:go:all\"",
     "dev:backend": "nodemon server.js",
     "dev:frontend": "npx http-server -p 3001 -c-1 -o",
-    "build:go": "cd go-services/order-matching-engine && go build -o bin/engine && cd ../market-data-service && go build -o bin/market",
-    "install:all": "npm install && cd go-services/order-matching-engine && go mod download && cd ../market-data-service && go mod download",
+    "build:go": "cd go-services/order-matching-engine && go build -o bin/engine && cd ../market-data-service && go build -o bin/market && cd ../prediction-service && go build -o bin/prediction .",
+    "install:all": "npm install && cd go-services/order-matching-engine && go mod download && cd ../market-data-service && go mod download && cd ../prediction-service && go mod download",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

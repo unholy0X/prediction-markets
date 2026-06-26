@@ -39,6 +39,7 @@ const PORT = 3000;
 // Go service URLs
 const GO_ENGINE_URL = 'http://localhost:8080';
 const GO_MARKET_URL = 'http://localhost:8081';
+const GO_PREDICTION_URL = process.env.GO_PREDICTION_URL || 'http://localhost:8082';
 
 // In-memory database (for testing)
 const users = [];
@@ -50,6 +51,7 @@ const testUser = {
   name: 'Test User',
   password: bcrypt.hashSync('password123', 10),
   balance: 10000,
+  isAdmin: true, // allowed to settle prediction markets
   createdAt: new Date().toISOString()
 };
 users.push(testUser);
@@ -70,6 +72,24 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
+// Authorization middleware: only admins may settle markets.
+function requireAdmin(req, res, next) {
+  const user = users.find(u => u.id === req.user.id);
+  if (!user || !user.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+}
+
+// Forward a Go-service error to the client, preserving its status/body when present.
+function forwardError(res, error, fallbackMsg) {
+  if (error.response) {
+    return res.status(error.response.status).json(error.response.data);
+  }
+  console.error(`${fallbackMsg}:`, error.message);
+  return res.status(502).json({ error: 'Prediction service unavailable' });
 }
 
 // Proxy to Go services
@@ -181,6 +201,112 @@ app.get('/api/trades', async (req, res) => {
   }
 });
 
+// ============================================================
+// Prediction Markets (proxied to Go prediction-service :8082)
+// ============================================================
+
+// List all markets (public)
+app.get('/api/predictions', async (req, res) => {
+  try {
+    const response = await axios.get(`${GO_PREDICTION_URL}/api/predictions`);
+    res.json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to list prediction markets');
+  }
+});
+
+// Get a single market (public)
+app.get('/api/predictions/:id', async (req, res) => {
+  try {
+    const response = await axios.get(`${GO_PREDICTION_URL}/api/predictions/${req.params.id}`);
+    res.json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to fetch prediction market');
+  }
+});
+
+// Trade history for a market (public)
+app.get('/api/predictions/:id/history', async (req, res) => {
+  try {
+    const response = await axios.get(`${GO_PREDICTION_URL}/api/predictions/${req.params.id}/history`);
+    res.json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to fetch trade history');
+  }
+});
+
+// Quote a trade cost without executing (public, used for balance/gas estimation)
+app.post('/api/predictions/:id/quote', async (req, res) => {
+  try {
+    const response = await axios.post(
+      `${GO_PREDICTION_URL}/api/predictions/${req.params.id}/quote`,
+      { outcome: req.body.outcome, shares: req.body.shares }
+    );
+    res.json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to quote trade');
+  }
+});
+
+// Create a new market (auth required; creator = current user)
+app.post('/api/predictions', authenticateToken, async (req, res) => {
+  try {
+    const payload = { ...req.body, createdBy: req.user.id };
+    const response = await axios.post(`${GO_PREDICTION_URL}/api/predictions`, payload);
+    res.status(201).json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to create prediction market');
+  }
+});
+
+// Trade on a market (auth required; checks and deducts balance)
+app.post('/api/predictions/:id/trade', authenticateToken, async (req, res) => {
+  const user = users.find(u => u.id === req.user.id);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const { outcome, shares } = req.body;
+  try {
+    // Pre-check affordability via a quote so we don't half-commit a trade.
+    const quote = await axios.post(
+      `${GO_PREDICTION_URL}/api/predictions/${req.params.id}/quote`,
+      { outcome, shares }
+    );
+    if (quote.data.totalCost > user.balance) {
+      return res.status(400).json({
+        error: 'Insufficient balance',
+        required: quote.data.totalCost,
+        balance: user.balance
+      });
+    }
+
+    // Execute, then deduct the actual cost returned by the AMM.
+    const response = await axios.post(
+      `${GO_PREDICTION_URL}/api/predictions/${req.params.id}/trade`,
+      { userId: user.id, outcome, shares }
+    );
+    user.balance -= response.data.trade.totalCost;
+
+    res.json({ ...response.data, balance: user.balance });
+  } catch (error) {
+    forwardError(res, error, 'Failed to execute trade');
+  }
+});
+
+// Settle a market (admin only)
+app.post('/api/predictions/:id/settle', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const response = await axios.post(
+      `${GO_PREDICTION_URL}/api/predictions/${req.params.id}/settle`,
+      { winningOutcome: req.body.winningOutcome }
+    );
+    res.json(response.data);
+  } catch (error) {
+    forwardError(res, error, 'Failed to settle market');
+  }
+});
+
 // Auth routes
 app.post('/api/auth/register', async (req, res) => {
   const { email, password, name } = req.body;
@@ -213,7 +339,8 @@ app.post('/api/auth/register', async (req, res) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      balance: user.balance
+      balance: user.balance,
+      isAdmin: !!user.isAdmin
     }
   });
 });
@@ -239,7 +366,8 @@ app.post('/api/auth/login', async (req, res) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      balance: user.balance
+      balance: user.balance,
+      isAdmin: !!user.isAdmin
     }
   });
 });
