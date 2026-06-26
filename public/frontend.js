@@ -85,6 +85,47 @@ const API = {
   async getHistory() {
     return this.request("/account/history");
   },
+
+  // Prediction Markets
+  async getPredictions() {
+    return this.request("/predictions");
+  },
+
+  async getPrediction(id) {
+    return this.request(`/predictions/${id}`);
+  },
+
+  async getPredictionHistory(id) {
+    return this.request(`/predictions/${id}/history`);
+  },
+
+  async quotePrediction(id, outcome, shares) {
+    return this.request(`/predictions/${id}/quote`, {
+      method: "POST",
+      body: JSON.stringify({ outcome, shares }),
+    });
+  },
+
+  async createPrediction(payload) {
+    return this.request("/predictions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async tradePrediction(id, outcome, shares) {
+    return this.request(`/predictions/${id}/trade`, {
+      method: "POST",
+      body: JSON.stringify({ outcome, shares }),
+    });
+  },
+
+  async settlePrediction(id, winningOutcome) {
+    return this.request(`/predictions/${id}/settle`, {
+      method: "POST",
+      body: JSON.stringify({ winningOutcome }),
+    });
+  },
 };
 
 // WebSocket Service
@@ -454,6 +495,379 @@ function PriceChart({ marketId }) {
   );
 }
 
+// ============================================================
+// Prediction Markets
+// ============================================================
+
+// Client-side LMSR Yes-probability — mirrors the Go service so we can
+// reconstruct a probability history by replaying past trades.
+function lmsrYesPrice(qYes, qNo, b) {
+  const m = Math.max(qYes, qNo);
+  const eYes = Math.exp((qYes - m) / b);
+  const eNo = Math.exp((qNo - m) / b);
+  return eYes / (eYes + eNo);
+}
+
+// Horizontal Yes/No probability bar.
+function ProbabilityMeter({ prices }) {
+  const yes = (prices?.Yes ?? 0.5) * 100;
+  const no = (prices?.No ?? 0.5) * 100;
+  return (
+    <div className="probability-meter">
+      <div className="yes-probability" style={{ width: `${yes}%` }}>
+        Yes {yes.toFixed(1)}%
+      </div>
+      <div className="no-probability" style={{ width: `${no}%` }}>
+        No {no.toFixed(1)}%
+      </div>
+    </div>
+  );
+}
+
+// Summary card for the markets grid.
+function PredictionCard({ market, onSelect }) {
+  return (
+    <div className="prediction-card" onClick={() => onSelect(market)}>
+      <div className="prediction-card-header">
+        <h3>{market.question}</h3>
+        <span className={`status-badge status-${market.status}`}>
+          {market.status}
+        </span>
+      </div>
+      <ProbabilityMeter prices={market.currentPrices} />
+      <div className="prediction-meta">
+        <span>Vol: ${market.volume24h.toFixed(2)}</span>
+        <span>Liquidity: ${market.totalLiquidity.toFixed(2)}</span>
+        <span>Expires: {new Date(market.expiryDate).toLocaleDateString()}</span>
+      </div>
+    </div>
+  );
+}
+
+// Create-market form.
+function CreateMarketForm({ onCreated }) {
+  const [question, setQuestion] = useState("");
+  const [description, setDescription] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await API.createPrediction({
+        question,
+        description,
+        expiryDate: new Date(expiryDate).toISOString(),
+      });
+      setQuestion("");
+      setDescription("");
+      setExpiryDate("");
+      onCreated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="create-market-form">
+      <h3>Create Prediction Market</h3>
+      {error && <div className="error-message">{error}</div>}
+      <form onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label>Question</label>
+          <input
+            type="text"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Will BTC reach $100k by Dec 31, 2026?"
+            required
+          />
+        </div>
+        <div className="form-group">
+          <label>Description</label>
+          <input
+            type="text"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Optional context"
+          />
+        </div>
+        <div className="form-group">
+          <label>Expiry Date</label>
+          <input
+            type="datetime-local"
+            value={expiryDate}
+            onChange={(e) => setExpiryDate(e.target.value)}
+            required
+          />
+        </div>
+        <button type="submit" className="btn-primary" disabled={submitting}>
+          {submitting ? "Creating..." : "Create Market"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// Buy Yes/No shares, with a live cost quote.
+function PredictionTradeForm({ market, onTraded }) {
+  const [outcome, setOutcome] = useState("Yes");
+  const [shares, setShares] = useState("");
+  const [quote, setQuote] = useState(null);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // Debounced live quote whenever outcome/shares change.
+  useEffect(() => {
+    const n = parseFloat(shares);
+    if (!n || n <= 0) {
+      setQuote(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      API.quotePrediction(market.id, outcome, n)
+        .then((q) => !cancelled && setQuote(q))
+        .catch(() => !cancelled && setQuote(null));
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [market.id, outcome, shares]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await API.tradePrediction(market.id, outcome, parseFloat(shares));
+      setShares("");
+      setQuote(null);
+      onTraded();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (market.status !== "active") {
+    return (
+      <div className="trading-form">
+        <h3>Trading Closed</h3>
+        <p>
+          This market is <strong>{market.status}</strong>
+          {market.winningOutcome ? ` — winner: ${market.winningOutcome}` : ""}.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="trading-form">
+      <h3>Trade</h3>
+      <div className="order-type-selector">
+        <button
+          type="button"
+          className={outcome === "Yes" ? "active" : ""}
+          onClick={() => setOutcome("Yes")}
+        >
+          Yes
+        </button>
+        <button
+          type="button"
+          className={outcome === "No" ? "active" : ""}
+          onClick={() => setOutcome("No")}
+        >
+          No
+        </button>
+      </div>
+      {error && <div className="error-message">{error}</div>}
+      <form onSubmit={handleSubmit}>
+        <div className="form-group">
+          <label>Shares</label>
+          <input
+            type="number"
+            value={shares}
+            onChange={(e) => setShares(e.target.value)}
+            step="1"
+            min="1"
+            placeholder="100"
+            required
+          />
+        </div>
+        <div className="form-group">
+          <label>Estimated Cost</label>
+          <input
+            type="text"
+            value={
+              quote
+                ? `$${quote.totalCost.toFixed(2)} (avg $${quote.pricePerShare.toFixed(3)}/share)`
+                : "—"
+            }
+            disabled
+          />
+        </div>
+        <button
+          type="submit"
+          className="btn-primary"
+          disabled={submitting || !quote}
+        >
+          {submitting ? "Trading..." : `Buy ${outcome}`}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+// Reconstructs the Yes-probability trajectory by replaying trade history.
+function ProbabilityChart({ market, history }) {
+  const ordered = history.slice().reverse(); // history arrives newest-first
+  let qYes = 0;
+  let qNo = 0;
+  const data = [{ t: "start", yes: 50 }];
+  ordered.forEach((tr, i) => {
+    if (tr.outcome === "Yes") qYes += tr.shares;
+    else qNo += tr.shares;
+    data.push({ t: `#${i + 1}`, yes: lmsrYesPrice(qYes, qNo, market.liquidityB) * 100 });
+  });
+
+  return (
+    <div className="price-chart">
+      <h3>Yes Probability History</h3>
+      <ResponsiveContainer width="100%" height={260}>
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="t" />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
+          <Tooltip formatter={(v) => `${Number(v).toFixed(1)}%`} />
+          <Line type="monotone" dataKey="yes" stroke="#16a34a" dot={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Full market view: chart, position, trade form, admin settlement.
+function PredictionDetail({ market, user, onClose, onChanged }) {
+  const [history, setHistory] = useState([]);
+  const [settleError, setSettleError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    API.getPredictionHistory(market.id)
+      .then((h) => !cancelled && setHistory(h))
+      .catch((err) => console.error("history load failed:", err));
+    return () => {
+      cancelled = true;
+    };
+    // Reload when volume changes (i.e. after a trade is recorded).
+  }, [market.id, market.volume24h]);
+
+  const myPosition = history
+    .filter((t) => t.userId === user.id)
+    .reduce((acc, t) => {
+      acc[t.outcome] = (acc[t.outcome] || 0) + t.shares;
+      return acc;
+    }, {});
+
+  const handleSettle = async (winningOutcome) => {
+    setSettleError("");
+    try {
+      await API.settlePrediction(market.id, winningOutcome);
+      onChanged();
+    } catch (err) {
+      setSettleError(err.message);
+    }
+  };
+
+  return (
+    <div className="market-detail">
+      <div className="market-detail-header">
+        <h2>{market.question}</h2>
+        <button className="close-btn" onClick={onClose}>
+          ×
+        </button>
+      </div>
+      {market.description && (
+        <p className="market-description">{market.description}</p>
+      )}
+      <ProbabilityMeter prices={market.currentPrices} />
+      <div className="prediction-meta">
+        <span>Status: {market.status}</span>
+        <span>Volume: ${market.volume24h.toFixed(2)}</span>
+        <span>Liquidity: ${market.totalLiquidity.toFixed(2)}</span>
+        <span>Expires: {new Date(market.expiryDate).toLocaleString()}</span>
+      </div>
+
+      <div className="market-detail-content">
+        <div className="left-panel">
+          <ProbabilityChart market={market} history={history} />
+          <div className="positions">
+            <h3>My Position</h3>
+            {Object.keys(myPosition).length === 0 ? (
+              <p>No shares yet.</p>
+            ) : (
+              Object.entries(myPosition).map(([o, s]) => (
+                <p key={o}>
+                  <strong>{o}:</strong> {s} shares
+                </p>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="right-panel">
+          <PredictionTradeForm market={market} onTraded={onChanged} />
+          {user.isAdmin && market.status !== "settled" && (
+            <div className="settle-panel">
+              <h3>Settle (Admin)</h3>
+              {settleError && <div className="error-message">{settleError}</div>}
+              <button className="btn-primary" onClick={() => handleSettle("Yes")}>
+                Settle as Yes
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() => handleSettle("No")}
+              >
+                Settle as No
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Predictions tab: create form + grid + detail.
+function PredictionsView({ predictions, selected, user, onSelect, onClose, onChanged }) {
+  return (
+    <div className="predictions-view">
+      <CreateMarketForm onCreated={onChanged} />
+      <div className="predictions-grid">
+        {predictions.length === 0 && <p>No prediction markets yet. Create one above.</p>}
+        {predictions.map((market) => (
+          <PredictionCard key={market.id} market={market} onSelect={onSelect} />
+        ))}
+      </div>
+      {selected && (
+        <PredictionDetail
+          market={selected}
+          user={user}
+          onClose={onClose}
+          onChanged={onChanged}
+        />
+      )}
+    </div>
+  );
+}
+
 // Main App Component
 function App() {
   const [user, setUser] = useState(null);
@@ -461,7 +875,13 @@ function App() {
   const [selectedMarket, setSelectedMarket] = useState(null);
   const [balance, setBalance] = useState(0);
   const [orders, setOrders] = useState([]);
+  const [predictions, setPredictions] = useState([]);
+  const [selectedPredictionId, setSelectedPredictionId] = useState(null);
   const [activeTab, setActiveTab] = useState("markets");
+
+  // Derive the selected prediction from the list so live WS updates flow into the detail view.
+  const selectedPrediction =
+    predictions.find((p) => p.id === selectedPredictionId) || null;
 
   useEffect(() => {
     wsService.connect();
@@ -484,7 +904,30 @@ function App() {
       fetchMarkets();
       fetchBalance();
       fetchOrders();
+      fetchPredictions();
     }
+  }, [user]);
+
+  // Real-time prediction updates straight from the Go prediction-service.
+  useEffect(() => {
+    if (!user) return;
+    const ws = new WebSocket("ws://localhost:8082/ws");
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (
+        ["price_update", "market_created", "market_settled"].includes(msg.type) &&
+        msg.payload
+      ) {
+        setPredictions((prev) => {
+          const exists = prev.some((p) => p.id === msg.payload.id);
+          return exists
+            ? prev.map((p) => (p.id === msg.payload.id ? msg.payload : p))
+            : [msg.payload, ...prev];
+        });
+      }
+    };
+    ws.onerror = () => {}; // service may be down; list still works via REST
+    return () => ws.close();
   }, [user]);
 
   const fetchMarkets = async () => {
@@ -512,6 +955,21 @@ function App() {
     } catch (err) {
       console.error("Failed to fetch orders:", err);
     }
+  };
+
+  const fetchPredictions = async () => {
+    try {
+      const data = await API.getPredictions();
+      setPredictions(data);
+    } catch (err) {
+      console.error("Failed to fetch predictions:", err);
+    }
+  };
+
+  // Refresh after any market-changing action (create/trade/settle).
+  const refreshPredictions = async () => {
+    await fetchPredictions();
+    await fetchBalance();
   };
 
   const handleLogout = () => {
@@ -542,6 +1000,12 @@ function App() {
           onClick={() => setActiveTab("markets")}
         >
           Markets
+        </button>
+        <button
+          className={activeTab === "predictions" ? "active" : ""}
+          onClick={() => setActiveTab("predictions")}
+        >
+          Predictions
         </button>
         <button
           className={activeTab === "orders" ? "active" : ""}
@@ -606,6 +1070,17 @@ function App() {
               </div>
             )}
           </div>
+        )}
+
+        {activeTab === "predictions" && (
+          <PredictionsView
+            predictions={predictions}
+            selected={selectedPrediction}
+            user={user}
+            onSelect={(market) => setSelectedPredictionId(market.id)}
+            onClose={() => setSelectedPredictionId(null)}
+            onChanged={refreshPredictions}
+          />
         )}
 
         {activeTab === "orders" && (
